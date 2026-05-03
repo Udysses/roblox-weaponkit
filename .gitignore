@@ -1,0 +1,16 @@
+# Roblox place and model files — don't commit these
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Rojo lock file
+*.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/

@@ -1,0 +1,19 @@
+{
+  "name": "WeaponKit",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "WeaponKit": {
+        "$path": "src/WeaponKit"
+      }
+    },
+    "StarterPack": {
+      "$className": "StarterPack",
+      "ExampleSword": {
+        "$className": "Tool",
+        "$path": "example/ExampleSword"
+      }
+    }
+  }
+}
