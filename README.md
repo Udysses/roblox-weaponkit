@@ -198,12 +198,13 @@ roblox-weaponkit/
 
 ---
 
-## Contributing
+## Copyright & Contributions
 
-Pull requests are welcome. Open an issue first for larger changes.
+**© 2026 Udysses. All rights reserved.**
 
----
+I am not currently accepting unsolicited Pull Requests. To maintain the integrity of this project:
 
-## License
-
-MIT
+1. **Viewing only:** You are welcome to explore the code here on GitHub.
+2. **No Unauthorized Redistribution:** Use, reproduction, or distribution of this code without express written permission is prohibited.
+3. **How to contribute:** If you have an idea for a feature or a bug fix, please **send me a Direct Message (DM)** or open a **GitHub Issue** first. 
+4. **Pull Requests:** PRs are restricted to approved collaborators. If we agree on a change, I will add you as a collaborator to allow your submission.
