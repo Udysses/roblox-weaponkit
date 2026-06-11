@@ -26,12 +26,20 @@
 --
 --   "lag accumulates the longer a session runs"
 --     → Maid rebuilds every equip cycle. Zero connections outlive their use.
+--
+--   "guns feel laggy / high-ping players miss"
+--     → Client sends workspace:GetServerTimeNow() with every fire event.
+--       Server rewinds positions to that timestamp before validating.
+--       For hitscan (cfg.weaponType = "hitscan"), the client does a local
+--       raycast immediately for visual feedback, then sends {origin, direction}
+--       for the server to re-validate with lag compensation.
 
 local Players = game:GetService("Players")
 local Debris  = game:GetService("Debris")
 
-local Maid   = require(script.Parent.Maid)
-local Config = require(script.Parent.Config)
+local Maid       = require(script.Parent.Maid)
+local Config     = require(script.Parent.Config)
+local Projectile = require(script.Parent.Projectile)
 
 -- ── Types ──────────────────────────────────────────────────────────────────
 
@@ -43,7 +51,7 @@ type TrackSet = {
 
 -- ── Module ─────────────────────────────────────────────────────────────────
 
-local Client = {}
+local Client   = {}
 Client.__index = Client
 
 -- ── Constructor ────────────────────────────────────────────────────────────
@@ -52,33 +60,35 @@ function Client.new(tool: Tool, userConfig: { [string]: any }?)
 	local cfg = Config.merge(Config.Defaults, userConfig or {})
 	Config.validate(cfg)
 
-	-- Apply RequiresHandle immediately so the tool is correct before equip.
-	-- Solves: "Activated never fires" when Handle isn't touching the ground.
 	tool.RequiresHandle = cfg.requiresHandle :: boolean
+
+	-- Cache OverlapParams for melee: creating it fresh each swing is wasteful
+	-- when the exclude list changes every equip (not every swing).
+	-- We rebuild it in _onEquip when the character reference changes.
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	overlapParams.MaxParts   = 60
 
 	return setmetatable({
 		_tool           = tool,
 		_config         = cfg,
-		_topMaid        = Maid.new(), -- Lives for the life of :Start()
-		_equipMaid      = Maid.new(), -- Rebuilt every equip cycle
+		_topMaid        = Maid.new(),
+		_equipMaid      = Maid.new(),
 		_tracks         = {} :: TrackSet,
 		_onCooldown     = false :: boolean,
 		_cooldownThread = nil :: thread?,
 		_hitCache       = {} :: { [Model]: boolean },
 		_remote         = nil :: RemoteEvent?,
+		_overlapParams  = overlapParams,
 	}, Client)
 end
 
 -- ── Public ─────────────────────────────────────────────────────────────────
 
---- Call once after requiring WeaponKit. Sets up Equipped / Unequipped listeners.
 function Client:Start()
 	local tool   = self._tool
 	local player = Players.LocalPlayer
 
-	-- Locate the RemoteEvent that Server.lua creates synchronously.
-	-- WaitForChild with a timeout gives a clear error instead of an infinite hang.
-	-- Solves: timing issues where the client looks for the event before it exists.
 	local remote = tool:WaitForChild("WeaponKit_Fire", 15) :: RemoteEvent?
 	if not remote then
 		warn(
@@ -99,7 +109,6 @@ function Client:Start()
 	end))
 end
 
---- Clean up everything. Call if you need to fully tear down the weapon.
 function Client:Destroy()
 	self:_onUnequip()
 	self._topMaid:Destroy()
@@ -108,35 +117,31 @@ end
 -- ── Private: equip / unequip ───────────────────────────────────────────────
 
 function Client:_onEquip(player: Player)
-	-- Rebuild per-equip state so nothing from the previous equip leaks in.
 	self._equipMaid:Destroy()
-	self._equipMaid = Maid.new()
+	self._equipMaid  = Maid.new()
 	self._onCooldown = false
 	self._hitCache   = {}
 
-	-- Wait for character — handles first spawn AND every respawn.
-	-- Solves: "attempt to index nil with 'Character'"
 	local char = player.Character or player.CharacterAdded:Wait()
 
-	-- WaitForChild with timeout gives a clear error message rather than hanging.
-	-- Solves: "attempt to index nil with 'Humanoid'"
 	local humanoid = char:WaitForChild("Humanoid", 10) :: Humanoid?
 	if not humanoid then
 		warn("[WeaponKit] Humanoid not found in character within 10 s — aborting equip for '" .. self._tool.Name .. "'")
 		return
 	end
 
-	-- Get or create the Animator. Roblox sometimes omits it on older rigs.
-	-- Solves: "LoadAnimation requires Humanoid to be a descendant" error.
 	local animator = humanoid:FindFirstChildOfClass("Animator") :: Animator?
 	if not animator then
 		animator = Instance.new("Animator")
 		animator.Parent = humanoid
 	end
 
+	-- Rebuild the cached OverlapParams exclude list with the current character.
+	-- Needed because the character Instance changes on each respawn.
+	self._overlapParams.FilterDescendantsInstances = { char }
+
 	self._tracks = self:_loadTracks(animator :: Animator)
 
-	-- Play equip animation first (if configured), then start idle loop.
 	if self._tracks.equip then
 		self._tracks.equip:Play()
 		self._tracks.equip.Stopped:Wait()
@@ -145,23 +150,18 @@ function Client:_onEquip(player: Player)
 		self._tracks.idle:Play()
 	end
 
-	-- Bind activation only after character is confirmed — no nil-ref risk.
 	self._equipMaid:Give(self._tool.Activated:Connect(function()
 		self:_onActivate()
 	end))
 
-	-- If the character dies while the weapon is equipped, clean up immediately.
 	self._equipMaid:Give((humanoid :: Humanoid).Died:Connect(function()
 		self:_onUnequip()
 	end))
 
-	-- Equip sound
 	self:_playSound(self._config.sounds.equip :: number)
 end
 
 function Client:_onUnequip()
-	-- Cancel any pending cooldown thread so it doesn't fire into the next equip.
-	-- Solves: "weapon stuck in cooldown after re-equipping quickly"
 	if self._cooldownThread then
 		pcall(task.cancel, self._cooldownThread)
 		self._cooldownThread = nil
@@ -169,19 +169,15 @@ function Client:_onUnequip()
 	self._onCooldown = false
 	self._hitCache   = {}
 
-	-- Stop every animation track that is still running.
-	-- Solves: "idle / swing animation stuck playing after unequip"
 	for _, track in self._tracks :: { [string]: AnimationTrack? } do
 		if track then
 			pcall(function()
-				track:Stop(0) -- 0 = instant stop, no fade-out blending artefacts
+				track:Stop(0)
 			end)
 		end
 	end
 	self._tracks = {}
 
-	-- Destroy the per-equip Maid — disconnects every connection from this cycle.
-	-- Solves: memory leak / lag accumulation over repeated equip sessions.
 	self._equipMaid:Destroy()
 	self._equipMaid = Maid.new()
 end
@@ -192,29 +188,19 @@ function Client:_onActivate()
 	if self._onCooldown then return end
 	self._onCooldown = true
 
-	-- Schedule cooldown reset with task.delay so it fires even if an error
-	-- occurs below. This is the ONLY place _onCooldown is set back to false
-	-- during normal play.
-	-- Solves: "weapon permanently stuck, can't shoot after any error mid-swing"
 	self._cooldownThread = task.delay(self._config.cooldown :: number, function()
-		self._onCooldown  = false
+		self._onCooldown     = false
 		self._cooldownThread = nil
 	end)
 
-	-- Clear per-swing hit cache.
-	-- Solves: same target being hit multiple times in one activation.
 	self._hitCache = {}
 
-	-- Transition idle → swing animation.
 	if self._tracks.idle then
 		self._tracks.idle:Stop()
 	end
 	if self._tracks.swing then
 		local swingTrack = self._tracks.swing :: AnimationTrack
 		swingTrack:Play()
-
-		-- Resume idle once swing animation finishes.
-		-- Using Once so the connection auto-disconnects and doesn't accumulate.
 		self._equipMaid:Give(swingTrack.Stopped:Once(function()
 			if self._tracks.idle and self._tool.Parent ~= nil then
 				self._tracks.idle:Play()
@@ -222,29 +208,81 @@ function Client:_onActivate()
 		end))
 	end
 
-	-- Play swing sound
 	self:_playSound(self._config.sounds.swing :: number)
 
-	-- Detect hits in the spatial hitbox
+	local weaponType = self._config.weaponType :: string
+
+	if weaponType == "hitscan" then
+		self:_fireHitscan()
+	else
+		self:_fireMelee()
+	end
+end
+
+-- ── Private: melee fire ────────────────────────────────────────────────────
+
+function Client:_fireMelee()
 	local hits = self:_detectHits()
 
 	if #hits > 0 then
 		self:_playSound(self._config.sounds.hit :: number)
 	end
 
-	-- Fire to server with the list of hit character names + positions.
-	-- Server validates independently — client data is not trusted for damage.
 	if self._remote then
-		self._remote:FireServer(hits)
+		-- Attach the client's server-synced timestamp so the server can rewind
+		-- positions for lag compensation.
+		local timestamp = workspace:GetServerTimeNow()
+		self._remote:FireServer(hits, timestamp)
 	end
 end
 
--- ── Private: hit detection ─────────────────────────────────────────────────
+-- ── Private: hitscan fire ──────────────────────────────────────────────────
+
+function Client:_fireHitscan()
+	local player = Players.LocalPlayer
+	local char   = player.Character
+	if not char then return end
+
+	-- Get the camera for aiming direction.
+	local camera    = workspace.CurrentCamera
+	local origin    = camera.CFrame.Position
+	local direction = camera.CFrame.LookVector
+
+	local hitscanCfg = self._config.hitscan :: { [string]: any }
+	local maxRange   = (hitscanCfg and hitscanCfg.maxRange :: number?) or 300
+
+	-- Client-side raycast for immediate visual feedback.
+	local result, timestamp = Projectile.Hitscan.Fire(origin, direction, maxRange, { char })
+
+	-- Spawn a tracer regardless of whether we hit something.
+	if hitscanCfg and hitscanCfg.tracerEnabled then
+		local endPoint = result and result.Position or (origin + direction.Unit * maxRange)
+		Projectile.SpawnTracer(origin, direction, endPoint, hitscanCfg)
+	end
+
+	-- Play hit sound if we landed on something with a Humanoid.
+	if result then
+		local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
+		if hitModel and hitModel:FindFirstChildOfClass("Humanoid") then
+			self:_playSound(self._config.sounds.hit :: number)
+		end
+	end
+
+	-- Send shot data to the server for authoritative validation.
+	if self._remote then
+		self._remote:FireServer({
+			origin    = origin,
+			direction = direction,
+			distance  = result and (origin - result.Position).Magnitude or maxRange,
+			timestamp = timestamp,
+		})
+	end
+end
+
+-- ── Private: melee hit detection ──────────────────────────────────────────
 
 type HitData = { charName: string, rootPos: Vector3 }
 
---- Returns all valid targets inside the forward hitbox this swing.
---- Uses GetPartBoundsInBox — no .Touched, no spam, no multi-hit.
 function Client:_detectHits(): { HitData }
 	local player = Players.LocalPlayer
 	local char   = player.Character
@@ -253,16 +291,13 @@ function Client:_detectHits(): { HitData }
 	local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not root then return {} end
 
-	local cfg    = self._config
-	local range  = cfg.range :: number
-	local boxCF  = root.CFrame * CFrame.new(0, 0, -(range / 2))
+	local cfg   = self._config
+	local range = cfg.range :: number
+	local boxCF = root.CFrame * CFrame.new(0, 0, -(range / 2))
 
-	local params = OverlapParams.new()
-	params.FilterDescendantsInstances = { char }
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.MaxParts   = 60
-
-	local parts   = workspace:GetPartBoundsInBox(boxCF, cfg.hitboxSize :: Vector3, params)
+	-- _overlapParams exclude list is updated in _onEquip, not here, so we
+	-- pay the allocation cost once per equip cycle instead of once per swing.
+	local parts   = workspace:GetPartBoundsInBox(boxCF, cfg.hitboxSize :: Vector3, self._overlapParams)
 	local results: { HitData } = {}
 	local seen: { [Model]: boolean } = {}
 
@@ -270,24 +305,17 @@ function Client:_detectHits(): { HitData }
 		local model = part:FindFirstAncestorOfClass("Model")
 		if not model or seen[model] then continue end
 
-		-- Must have a living Humanoid (works on R6, R15, and NPCs).
 		local humanoid = model:FindFirstChildOfClass("Humanoid") :: Humanoid?
 		if not humanoid or humanoid.Health <= 0 then continue end
 
-		-- Per-swing debounce: hit each model at most once per activation.
-		-- Solves: the classic "Touched fires 10-30x per swing" problem.
 		if self._hitCache[model] then continue end
 		self._hitCache[model] = true
-		seen[model] = true
+		seen[model]           = true
 
-		-- Send root position for server distance validation.
 		local modelRoot = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 		local pos = modelRoot and modelRoot.Position or part.Position
 
-		table.insert(results, {
-			charName = model.Name,
-			rootPos  = pos,
-		})
+		table.insert(results, { charName = model.Name, rootPos = pos })
 	end
 
 	return results
@@ -325,8 +353,6 @@ function Client:_loadTracks(animator: Animator): TrackSet
 	if tracks.equip then (tracks.equip :: AnimationTrack).Looped = false end
 	if tracks.swing then (tracks.swing :: AnimationTrack).Looped = false end
 
-	-- Register all tracks in the equip Maid so they stop + get destroyed on unequip.
-	-- Solves: AnimationTracks accumulating and playing invisibly after unequip.
 	for _, track in tracks :: { [string]: AnimationTrack? } do
 		if track then
 			local t = track :: AnimationTrack
@@ -346,9 +372,9 @@ end
 
 function Client:_playSound(soundId: number)
 	if not soundId or soundId == 0 then return end
-	local sound    = Instance.new("Sound")
-	sound.SoundId  = "rbxassetid://" .. tostring(soundId)
-	sound.Parent   = self._tool
+	local sound   = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://" .. tostring(soundId)
+	sound.Parent  = self._tool
 	sound:Play()
 	Debris:AddItem(sound, 5)
 end
