@@ -100,13 +100,18 @@ function ACSBridge.HookRemotes(server: any, onHit: OnHitCallback): number
 	local root = ACSBridge.FindEngine()
 	if not root then return 0 end
 
-	-- Search in known sub-locations first, then the whole tree.
-	local searchRoots: { Instance } = {
-		root,
-		root:FindFirstChild("Remotes") or root,
-		root:FindFirstChild("Events")  or root,
-		root:FindFirstChild("Server")  or root,
-	}
+	-- Build a deduplicated list of folders to search.
+	-- Using `or root` as a fallback would push `root` multiple times when
+	-- sub-folders don't exist, causing redundant searches and misleading logs.
+	local searchRoots: { Instance } = { root }
+	local searchRootSet: { [Instance]: boolean } = { [root] = true }
+	for _, subName in { "Remotes", "Events", "Server" } do
+		local sub = root:FindFirstChild(subName)
+		if sub and not searchRootSet[sub] then
+			table.insert(searchRoots, sub)
+			searchRootSet[sub] = true
+		end
+	end
 
 	local hooked = 0
 	local seen: { [RemoteEvent]: boolean } = {}
@@ -189,8 +194,10 @@ function ACSBridge._onACSFire(
 	remoteName:  string,
 	...
 )
-	-- Rate-limit check using the WeaponKit server's limiter.
-	if server and not server:_checkRate(player) then
+	-- Rate-limit check using the WeaponKit server's shared rate bucket.
+	-- ACS shots intentionally share the bucket with WeaponKit shots — a player
+	-- firing both simultaneously should not bypass the combined rate ceiling.
+	if server and not server:CheckRate(player) then
 		warn(("[WeaponKit/ACSBridge] Rate limit hit for %s via %s"):format(
 			player.Name, remoteName
 		))

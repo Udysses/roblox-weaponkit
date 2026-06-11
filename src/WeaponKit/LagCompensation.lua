@@ -68,6 +68,11 @@ end
 
 -- Returns the shared instance, creating and wiring it on first call.
 -- Automatically registers all current and future player characters.
+-- Used by diagnose() to report whether the singleton is running.
+function LagCompensation.isActive(): boolean
+	return _shared ~= nil
+end
+
 function LagCompensation.getShared(): any
 	if _shared then return _shared end
 
