@@ -113,12 +113,12 @@ WeaponKit.Server.new(script.Parent, {
 -- Script
 local server = WeaponKit.Server.new(script.Parent, { damage = 45 })
 
-server.hooks.OnHit:Connect(function(ctx)
-    print(ctx.shooter.Name, "hit", ctx.victim.Name, "for", ctx.damage, "HP")
-    -- ctx also has: isHeadshot, distance, hitPart, weaponName, timestamp
+server.hooks.OnHit:Connect(function(player, victim, damage, ctx)
+    print(player.Name, "hit", victim.Name, "for", damage, "HP")
+    -- ctx: isHeadshot, distance, hitPart, weaponName, weaponType, rawDamage, pierceIndex, timestamp
 end)
 
-server.hooks.OnKill:Connect(function(ctx)
+server.hooks.OnKill:Connect(function(player, victim, ctx)
     -- award points, play sound, etc.
 end)
 
@@ -194,19 +194,21 @@ local Hooks = require(game.ReplicatedStorage.WeaponKit.Hooks)
 local hooks = Hooks.new()
 
 -- Wire up in your damage code:
-hooks.OnHit:Fire({
-    shooter    = player,
-    victim     = victimModel,
-    damage     = finalDamage,
-    rawDamage  = 45,
-    isHeadshot = wasHeadshot,
-    distance   = distance,
-    weaponName = "Rifle",
-    timestamp  = workspace:GetServerTimeNow(),
+hooks.OnHit:Fire(player, victimModel, finalDamage, {
+    weaponName  = "Rifle",
+    weaponType  = "hitscan",
+    damage      = finalDamage,
+    rawDamage   = 45,
+    isHeadshot  = wasHeadshot,
+    distance    = distance,
+    hitPart     = nil,
+    hitPos      = nil,
+    timestamp   = workspace:GetServerTimeNow(),
+    pierceIndex = 0,
 })
 
 -- Somewhere else, listen:
-hooks.OnKill:Connect(function(ctx)
+hooks.OnKill:Connect(function(player, victim, ctx)
     -- award kill streak, etc.
 end)
 ```

@@ -242,7 +242,9 @@ function Validator:ValidateHitscanPierce(
 
 		local hitPart  = result.Instance :: BasePart
 		local hitModel = hitPart:FindFirstAncestorOfClass("Model") :: Model?
-		local dist     = (rayOrigin - result.Position).Magnitude
+		-- Total distance from the original shot origin, not from the previous pierce point.
+		-- Falloff and HitContext.distance both expect attacker → victim, not segment distance.
+		local dist     = (origin :: Vector3 - result.Position).Magnitude
 
 		if hitModel then
 			local hum = hitModel:FindFirstChildOfClass("Humanoid")
