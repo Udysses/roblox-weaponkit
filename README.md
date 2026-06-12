@@ -2,6 +2,73 @@
 
 A Roblox weapon framework that handles security, lag compensation, animations, and ACS integration — so you don't have to.
 
+---
+
+## Features
+
+### Hit detection
+- **Melee** — `GetPartBoundsInBox` sweep in front of the character; per-swing cache prevents the same target being hit twice per swing
+- **Hitscan** — instant server-side raycast from camera origin; validated independently of the client
+- **Bullet pierce** — successive raycasts through targets with configurable damage decay per target
+- **Headshots** — configurable part name and damage multiplier (works on any rig)
+- **Damage falloff** — linear, quadratic, or exponential curve over distance with a configurable floor
+
+### Security (all server-side, client data never trusted)
+- **Rate limiter** — max activations per player per second; excess events silently dropped
+- **Range validation** — server measures attacker → victim distance independently
+- **Damage clamp** — hard ceiling on damage regardless of what ACS or the client sends
+- **Hit count ceiling** — single fire event cannot claim more than N targets
+- **Speed / teleport check** — server-measured displacement between shots; rejects teleport exploiters
+- **Line-of-sight check** — server raycast from attacker to victim; rejects through-wall hits
+
+### Lag compensation
+- **20 Hz position history** per character, kept for up to 1 second
+- **Timestamp rewind** — on each fire event the server rewinds all hitboxes to the moment the client fired ("favor-the-shooter", same as Source engine)
+- **Shared singleton** — one sampler serves all weapons on the server; no duplicate overhead
+
+### ACS integration
+- **Auto-detect** — finds ACS in ReplicatedStorage under any common folder name
+- **Remote intercept** — hooks ACS's damage remote(s) and pipes every hit through WeaponKit's validation
+- **Multi-version payload parsing** — supports ACS v2, v3, and v4 damage event formats
+- **Shared rate bucket** — ACS shots and WeaponKit shots count toward the same per-player ceiling
+
+### Client performance
+- **Effect pool** — pre-allocates tracer `Part` objects and recycles them; eliminates GC spikes at 600+ RPM fire rates
+- **UnreliableRemoteEvent** for visuals — impact effects, shell casings, and muzzle flash broadcast on a separate unreliable channel so they don't congest the reliable damage remote
+- **Parallel Luau validation** — melee hit-validation loop runs desynchronised from the main thread when inside a Roblox Actor
+
+### Weapon state machine (client)
+- States: `Idle` → `Equipping` → `Firing` → `Reloading`
+- Prevents double-activation, firing during equip animation, and firing while reloading
+- `canFire()` is the single gate — your code checks one boolean
+
+### Event hooks
+- `OnHit(player, victim, damage, ctx)` — fires after every validated hit; `ctx` carries damage, distance, headshot flag, hit part, pierce index, and timestamp
+- `OnKill(player, victim, ctx)` — fires when a hit brings `Humanoid.Health` to ≤ 0
+- `OnMiss(player, reason)` — fires when a shot is rejected during server validation
+- `OnRateExceeded(player)` — fires when the rate limiter or speed check drops an event
+- Available on both `Server` and `Client` instances; client hooks fire immediately for local feedback (screen shake, UI flash)
+
+### Memory management
+- **Maid lifecycle** — all connections, animation tracks, and instances are tracked and cleaned up on every unequip, death, or destroy; zero leaks across long sessions
+- **OverlapParams caching** — rebuilt once per equip cycle, not per swing
+
+### Animations & sound
+- Idle (looped), swing (one-shot), and equip (one-shot) tracks with `Enum.AnimationPriority.Action` applied automatically
+- Tracks stopped and destroyed on unequip; no "animation stuck" state
+- Per-event sound IDs; `Debris` auto-cleans sound instances
+
+### Developer tools
+- `WeaponKit.diagnose(tool)` — Studio Command Bar utility; reports missing scripts, bad remotes, wrong tool placement, malformed animation IDs, and ACS detection status
+- **Debug visualization** — server sends coloured hitbox and ray adornments to a named player via a dedicated `RemoteEvent`; zero cost in production when disabled
+
+### Compatibility
+- Works on R6, R15, and custom rigs — uses `FindFirstChildOfClass("Humanoid")` throughout
+- Works on NPCs — no `Players` lookup required for victims
+- Compatible with tools from the Toolbox — just replace the scripts, keep the Handle and meshes
+
+---
+
 **Pick your path:**
 
 | I want to… | Go to |
